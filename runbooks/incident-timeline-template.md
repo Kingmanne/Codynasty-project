@@ -193,6 +193,20 @@
 
 **Recovery:** The worker was restored to codedynasty-users and concurrency to 5. The 154 DLQ messages were redriven. The notes report 154 stormB records in production afterward and a fresh signup verified at 15:28:31 UTC.
 
-**Data integrity qualification:** Do not claim zero data loss until all 1,500 submitted emails have been reconciled against the throttle-test table, production table, and DLQ evidence. Accepted HTTP 202 responses alone do not prove that every registration was ultimately persisted.
+**Data integrity:** Reconciled. All 1,500 stormB emails were present across the throttle-test and production tables, 0 missing, 108 in both. Final data loss: 0.
 
 **Final outcome:** Service recovery was observed. Complete data reconciliation and the corrective actions above remain to be verified or completed.
+
+## Injection 4: The Front Door Says No
+
+- Original stage throttle: rate 50, burst 100. Reduced to rate 1, burst 1.
+- T0: 15:46:33 UTC. Throttle applied 15:46:50.
+- Loop 1 (15:47:19): 37 x 202, 3 x 429. Loop 2 (15:48:25): 78 x 202, 122 x 429.
+- Metrics: 4xx = 3 at 15:47 and 122 at 15:48. 5xx = 0 throughout.
+- Access log: 429s with integrationStatus "-" and responseLatency 1 ms. Integration never invoked.
+- First signal: anomalydetectionalarm at 15:48:02 (MTTD 1m29s). It watches Invocations of signup-producer, so it flagged unusual traffic, not rejected users.
+- Restored: 15:54:55. Verified recovery: five 202s at 15:55:26. MTTR 8m53s.
+- Data: 115 accepted requests produced 115 test records; all 120 gate* users (incl. 5 recovery) deleted.
+- Canary noticed: NO. Ran at 15:47:09 and 15:52:09, both 202 with healthy:1. It measures path availability, not capacity.
+- Finding: no alarm separates a deliberate 429 from a real 5xx. Correction: alarm on 4xx rate and 5xx separately.
+- Finding: a 1/1 limit shed 61% of a 200-request burst, not 100% (throttling is approximate).
