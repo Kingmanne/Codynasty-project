@@ -106,3 +106,93 @@
 - Verify application recovery and data completeness after every remediation.
 
 **Final outcome:** Injection 1 recovered; five of five test registrations verified; zero missing.
+
+## Injection 3 — Downstream Throttling and the Retry Storm
+
+### Incident details
+
+- Date: 2026-10-28
+- Region: us-east-1
+- Worker environment variable: USERS_TABLE
+- Throttle-test table: codedynasty-users-gameday (1 WCU / 1 RCU)
+- Event source mapping: batch size 5, ReportBatchItemFailures enabled, maxReceiveCount 3
+- Worker concurrency: original 5; raised to 20 for injection; reduced to 2 for containment; restored to 5
+
+### Timeline (UTC)
+
+| UTC time | Event | Evidence source |
+|---|---|---|
+| 14:32:19 | T0 — Run 1 started | UTC timestamp |
+| 14:32:37 | Worker repointed to codedynasty-users-gameday | Lambda LastModified |
+| 14:34:09 | Run 1 load started: 400 requests, all HTTP 202 | Terminal |
+| 14:35 | Run 1: 21 WriteThrottleEvents, absorbed by SDK retries; no measured loss or alarm | CloudWatch |
+| 14:41:42 | Run 2 load started: 1,500 requests (stormB1–stormB1500) | UTC timestamp |
+| 14:43:02 | First signal: anomalydetectionalarm changed from OK to ALARM | Alarm history |
+| 14:43:32 | signup-worker-error-alarm changed from OK to ALARM | Alarm history |
+| 14:44 | WriteThrottleEvents peaked at 461 per minute | CloudWatch |
+| Approximately 14:45 | Main queue: 429 visible, 223 in flight; DLQ: 0 | SQS |
+| 14:46:03 | Containment: maximum concurrency reduced from 20 to 2 | Lambda LastModified |
+| 14:48:05 | In flight: 26; DLQ: 12 | SQS |
+| 14:53:07 | DLQ: 150; no throttle datapoints after 14:46 | SQS / CloudWatch |
+| 14:57:38 | DLQ: 154; drain approximately 55 writes per minute | SQS |
+| 15:03:16 | Main queue empty; throttle-test table contained 1,860 records | SQS / DynamoDB |
+| Approximately 15:18 | Worker table restored to codedynasty-users; concurrency restored to 5 at 15:18:26 | Lambda configuration |
+| Approximately 15:22 | DLQ redrive completed: 154 messages returned to main queue | SQS |
+| Approximately 15:24 | 154 stormB records reported in codedynasty-users after redrive | DynamoDB |
+| 15:28:31 | Fresh signup verified in codedynasty-users; recovery-time upper bound | GetItem |
+
+### Measurements
+
+- Run 1 load: 400 requests; 21 WriteThrottleEvents; no alarm; no measured loss.
+- Run 2 load: 1,500 requests submitted; all reportedly received HTTP 202, but per-status-code counts were not captured.
+- Run 2 records written to throttle-test table: 1,454.
+- Run 2 messages dead-lettered and reported as never written: 46.
+- DLQ sample: 153 distinct emails among 154 messages; approximately 107 were already written before being dead-lettered.
+- Messages redriven to the main queue: 154.
+- Records reported in production after redrive: 154 stormB records.
+- Final data loss: not yet independently confirmed. Reconcile all 1,500 submitted emails against both tables and the DLQ before declaring zero loss.
+- MTTD: 1 minute 20 seconds from Run 2 load start; 10 minutes 43 seconds from Run 1 T0.
+- Time to containment: 4 minutes 21 seconds from Run 2 load start.
+- Service MTTR upper bound: 56 minutes 12 seconds from T0; 46 minutes 49 seconds from Run 2 start.
+- Alarms that fired: anomalydetectionalarm and signup-worker-error-alarm.
+- Missing signal: an alarm for WriteThrottleEvents greater than zero on the users table.
+
+### Findings
+
+- The 400-request Run 1 was absorbed by burst capacity; the 1,500-request Run 2 produced sustained throttling and a retry storm.
+- SDK retries absorbed some throttling without triggering the current alarms.
+- Reducing concurrency from 20 to 2 stopped observed throttling and in-flight churn, but the evidence does not show that it made the backlog drain faster.
+- The DLQ grew to 154 messages. At 15:03:16, the main queue was empty and the throttle-test table held 1,860 records.
+- The record stormB357 had no worker log lines and no table record; it was reported as dead-lettered without processing.
+- Approximately 107 DLQ messages appeared to correspond to records already present in DynamoDB. The worker treated ConditionalCheckFailedException as a failure rather than an idempotent success.
+- maxReceiveCount of 3 may be too low for a capped-concurrency consumer handling a deep backlog; validate a higher threshold through controlled testing.
+- Worker logs record err.message only, making exception types harder to search.
+- The producer queues plaintext passwords. This is a security issue requiring remediation.
+- Repository code does not match the deployed signup-worker; reconcile and review before the next deployment.
+- API stage DetailedMetricsEnabled is false.
+
+### Corrective actions
+
+| Action | Owner | Due date | Status |
+|---|---|---|---|
+| Add an alarm for WriteThrottleEvents greater than zero on the users table | TBD | TBD | Open |
+| Evaluate increasing maxReceiveCount to at least 5 under controlled testing | TBD | TBD | Open |
+| Treat ConditionalCheckFailedException as success when it represents an already-processed registration | TBD | TBD | Open |
+| Log err.name as well as a safe error message | TBD | TBD | Open |
+| Remove plaintext passwords from queued messages; use a secure credential-handling design | TBD | TBD | Open |
+| Reconcile deployed signup-worker with repository code and review the differences | TBD | TBD | Open |
+| Record original configuration values before every fault injection or remediation | TBD | TBD | Open |
+
+### Post-incident review
+
+**Root cause:** The 1 WCU throttle-test table could not sustain the injected write load. Increased worker concurrency and SQS redelivery created a retry storm and moved messages to the DLQ.
+
+**Detection:** The anomaly alarm fired 1 minute 20 seconds after Run 2 started. The current alarm set did not detect the initial throttling absorbed by SDK retries.
+
+**Containment:** Worker concurrency was reduced from 20 to 2 at 14:46:03 UTC. Throttling datapoints stopped after approximately 14:46, but messages continued to reach the DLQ.
+
+**Recovery:** The worker was restored to codedynasty-users and concurrency to 5. The 154 DLQ messages were redriven. The notes report 154 stormB records in production afterward and a fresh signup verified at 15:28:31 UTC.
+
+**Data integrity qualification:** Do not claim zero data loss until all 1,500 submitted emails have been reconciled against the throttle-test table, production table, and DLQ evidence. Accepted HTTP 202 responses alone do not prove that every registration was ultimately persisted.
+
+**Final outcome:** Service recovery was observed. Complete data reconciliation and the corrective actions above remain to be verified or completed.
