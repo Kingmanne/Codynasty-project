@@ -23,7 +23,7 @@
    ```bash
    aws sqs get-queue-attributes \
      --queue-url https://sqs.us-east-1.amazonaws.com/371510064293/codedynasty-signup-queue \
-     --attribute-names ApproximateNumberOfMessagesVisible ApproximateNumberOfMessagesNotVisible ApproximateAgeOfOldestMessage \
+     --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible \
      --region us-east-1
    ```
 
@@ -32,7 +32,7 @@
    ```bash
    aws sqs get-queue-attributes \
      --queue-url https://sqs.us-east-1.amazonaws.com/371510064293/codedynasty-signup-dlq \
-     --attribute-names ApproximateNumberOfMessagesVisible ApproximateNumberOfMessagesNotVisible ApproximateAgeOfOldestMessage \
+     --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible \
      --region us-east-1
    ```
 
@@ -108,3 +108,27 @@ For the exercise, stop the injection and restore known-good settings at the hard
 - CloudTrail event IDs for configuration or IAM changes.
 - Queue and DLQ counts before and after recovery.
 - Number of submitted signups, created records, duplicates and unreconciled messages.
+
+## Game day corrections (2026-10-28)
+
+Immediate checks, corrected:
+- Queue depth: aws sqs get-queue-attributes --queue-url https://sqs.us-east-1.amazonaws.com/371510064293/codedynasty-signup-queue --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible --region us-east-1
+- DLQ depth: same command against https://sqs.us-east-1.amazonaws.com/371510064293/codedynasty-signup-dlq
+- Queue age is a CloudWatch metric, not a queue attribute: aws cloudwatch get-metric-statistics --namespace AWS/SQS --metric-name ApproximateAgeOfOldestMessage --dimensions Name=QueueName,Value=codedynasty-signup-queue --start-time START --end-time END --period 60 --statistics Maximum --region us-east-1
+
+Decision points, corrected:
+- The worker handler catches every exception, so the Lambda Errors metric stays flat for permission and write failures. Do not wait for "Worker Errors high". Use DLQ depth, queue age and the log line "level":"error" in /aws/lambda/signup-worker.
+- Throttling: filter worker logs for the words "provisioned throughput" (the handler logs err.message only). Check WriteThrottleEvents on the users table. No alarm covers it yet.
+- Front door: 4xx rising with 5xx flat means a deliberate throttle (429), not a backend failure. Raise the stage limit, do not scale anything. Restore value: rate 50, burst 100.
+
+Containment, corrected:
+- Dropping worker concurrency stops throttling but does not stop dead-lettering when maxReceiveCount is 3. Record the original value (5) before any change.
+
+Recovery, corrected:
+- Redrive the DLQ only after the cause is fixed and the worker points at codedynasty-users.
+- Expect some DLQ messages to be signups that were already written, because the worker reports ConditionalCheckFailedException as a failure. Check the table before assuming loss.
+
+Monitoring caveats:
+- anomalydetectionalarm watches Invocations of signup-producer. It detects unusual traffic, not rejected requests or backend failure.
+- The canary sends one request every 5 minutes and passes during a throttle outage. It measures availability, not capacity.
+- The worker env var is USERS_TABLE. Record original values (concurrency 5, throttle 50/100) before every change.
