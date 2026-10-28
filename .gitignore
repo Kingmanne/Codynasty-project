@@ -1,0 +1,44 @@
+# Environment files and secrets
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# Credentials and private keys
+credentials
+**/credentials
+*.pem
+*.key
+
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build output and generated files
+dist/
+**/dist/
+build/
+**/build/
+.next/
+**/.next/
+coverage/
+**/coverage/
+
+# Local tooling and operating system files
+.DS_Store
+**/.DS_Store
+*.log
+
+# Python generated files
+__pycache__/
+*.py[cod]
+
+# Terraform local state and secrets
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+**/.aws-sam/
+**/.aws-sam/

@@ -1,0 +1,240 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Transform: AWS::Serverless-2016-10-31
+
+Description: CodeDynasty Full Serverless Backend Stack
+
+Globals:
+  Function:
+    Runtime: nodejs24.x
+
+    Architectures:
+      - x86_64
+
+    Timeout: 30
+
+    MemorySize: 256
+
+    Environment:
+      Variables:
+        USERS_TABLE: !Ref UsersTable
+        JWT_SECRET: codedynasty-secret
+
+Resources:
+  # -------------------------
+  # DynamoDB Users Table
+  # -------------------------
+
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+
+    Properties:
+      TableName: codedynasty-users-sam
+
+      BillingMode: PAY_PER_REQUEST
+
+      AttributeDefinitions:
+        - AttributeName: email
+          AttributeType: S
+
+      KeySchema:
+        - AttributeName: email
+          KeyType: HASH
+
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+    # -------------------------
+  # JWT Secret
+  # -------------------------
+
+  JwtSecret:
+    Type: AWS::SecretsManager::Secret
+
+    Properties:
+      Name: codedynasty/sam/jwt-secret
+
+      Description: JWT secret for CodeDynasty SAM login Lambda
+
+      SecretString: |
+        {
+          "jwtSecret": "codedynasty-secret"
+        }
+  # -------------------------
+  # SQS Queue
+  # -------------------------
+
+  SignupQueue:
+    Type: AWS::SQS::Queue
+
+    Properties:
+      QueueName: codedynasty-signup-queue-sam
+
+      VisibilityTimeout: 60
+
+  # -------------------------
+  # API Gateway
+  # -------------------------
+
+  CodeDynastyApi:
+    Type: AWS::Serverless::Api
+
+    Properties:
+      StageName: prod
+
+      Cors:
+        AllowOrigin: "'*'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowMethods: "'GET,POST,OPTIONS'"
+
+  # -------------------------
+  # Signup Producer
+  # -------------------------
+
+  SignupProducerFunction:
+    Type: AWS::Serverless::Function
+
+    Properties:
+      FunctionName: codedynasty-signup-producer
+
+      CodeUri: functions/signupProducer/
+
+      Handler: index.handler
+
+      Environment:
+        Variables:
+          SQS_QUEUE_URL: !Ref SignupQueue
+
+          USERS_TABLE: !Ref UsersTable
+
+      Policies:
+        # Allows sending signup messages to SQS
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt SignupQueue.QueueName
+
+        # Allows checking if email already exists
+        - DynamoDBReadPolicy:
+            TableName: !Ref UsersTable
+
+      Events:
+        SignupApi:
+          Type: Api
+
+          Properties:
+            RestApiId: !Ref CodeDynastyApi
+
+            Path: /signup
+
+            Method: POST
+
+  # -------------------------
+  # Signup Worker
+  # -------------------------
+
+  SignupWorkerFunction:
+    Type: AWS::Serverless::Function
+
+    Properties:
+      FunctionName: codedynasty-signup-worker
+
+      CodeUri: functions/signupWorker/
+
+      Handler: index.handler
+
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersTable
+
+      Events:
+        SignupQueueEvent:
+          Type: SQS
+
+          Properties:
+            Queue: !GetAtt SignupQueue.Arn
+
+            BatchSize: 10
+
+  # -------------------------
+  # Login Lambda
+  # -------------------------
+
+  LoginFunction:
+    Type: AWS::Serverless::Function
+
+    Properties:
+      FunctionName: codedynasty-login
+
+      CodeUri: functions/login/
+
+      Handler: index.handler
+
+      Environment:
+        Variables:
+          JWT_SECRET_ID: !Ref JwtSecret
+
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref UsersTable
+
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Ref JwtSecret
+
+      Events:
+        LoginApi:
+          Type: Api
+
+          Properties:
+            RestApiId: !Ref CodeDynastyApi
+
+            Path: /login
+
+            Method: POST
+
+  # -------------------------
+  # List Users Lambda
+  # -------------------------
+
+  ListUsersFunction:
+    Type: AWS::Serverless::Function
+
+    Properties:
+      FunctionName: codedynasty-list-users
+
+      CodeUri: functions/listUsers/
+
+      Handler: index.handler
+
+      ReservedConcurrentExecutions: 2
+
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref UsersTable
+
+      Events:
+        UsersApi:
+          Type: Api
+
+          Properties:
+            RestApiId: !Ref CodeDynastyApi
+
+            Path: /users
+
+            Method: GET
+
+# -------------------------
+# Outputs
+# -------------------------
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint
+
+    Value: !Sub "https://${CodeDynastyApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
+
+  TableName:
+    Value: !Ref UsersTable
+
+  QueueName:
+    Value: !GetAtt SignupQueue.QueueName

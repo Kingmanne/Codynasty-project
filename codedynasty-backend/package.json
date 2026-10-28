@@ -1,0 +1,13 @@
+{
+  "name": "codedynasty-backend",
+  "version": "1.0.0",
+  "description": "CodeDynasty Lambda functions — Node.js 20",
+  "dependencies": {
+    "@aws-sdk/client-appconfigdata": "^3.1068.0",
+    "@aws-sdk/client-dynamodb": "^3.1068.0",
+    "@aws-sdk/client-sqs": "^3.1068.0",
+    "@aws-sdk/util-dynamodb": "^3.996.4",
+    "bcryptjs": "^2.4.3",
+    "jsonwebtoken": "^9.0.3"
+  }
+}
